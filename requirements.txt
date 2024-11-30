@@ -1,0 +1,6 @@
+python-dotenv
+langchain-openai
+langchain-elasticsearch
+elasticsearch
+google-generativeai
+moviepy

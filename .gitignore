@@ -1,0 +1,5 @@
+*.yml
+__pycache__
+.env
+.streamlit
+data
