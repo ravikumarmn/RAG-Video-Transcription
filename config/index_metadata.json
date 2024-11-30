@@ -1,0 +1,34 @@
+{
+  "transcript_metadata": [
+    {
+      "metadata": {
+        "file_path": "python_tutor.mp4",
+        "last_processed": "2024-11-30T11:33:08.413574",
+        "file_size": 25854101,
+        "modified_time": "2024-11-30T07:39:51.529873",
+        "vtt_file": "python_tutor_20241130_113230.vtt",
+        "title": "Python Tutorials"
+      }
+    },
+    {
+      "metadata": {
+        "file_path": "GreatRedSpot.mp4",
+        "last_processed": "2024-11-30T11:42:00.719686",
+        "file_size": 238090979,
+        "modified_time": "2024-06-11T08:30:56",
+        "vtt_file": "GreatRedSpot_20241130_114034.vtt",
+        "title": "Great Red Spot"
+      }
+    },
+    {
+      "metadata": {
+        "file_path": "macbook_airpod_no_Desktop_no_cooler.mp4",
+        "last_processed": "2024-11-30T11:49:39.349386",
+        "file_size": 25854101,
+        "modified_time": "2024-11-05T16:05:47.040852",
+        "vtt_file": "macbook_airpod_no_Desktop_no_cooler_20241130_114905.vtt",
+        "title": "Python Tutorials along with macbook airpod no Desktop no cooler"
+      }
+    }
+  ]
+}
