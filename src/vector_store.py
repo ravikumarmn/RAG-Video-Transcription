@@ -175,22 +175,86 @@ class VideoTranscriptionStore:
             self.upsert_video(video_file.name)
 
     def search_transcriptions(
-        self, query: str, filter_metadata: Optional[Dict] = None, k: int = 5
+        self, query: str, k: int = 5, score_threshold: float = 0.90
     ) -> List[Dict]:
         """
         Search transcriptions using a natural language query.
 
         Args:
             query: Search query
-            filter_metadata: Optional metadata filters (e.g., {"video_filename": "example.mp4"})
             k: Number of results to return
+            score_threshold: Minimum similarity score threshold (default: 0.90)
 
         Returns:
             List of relevant transcription segments with metadata
         """
-        # Perform the search with more results to account for duplicates
+        try:
+            # Get results from vector store
+            results = self.vector_store.similarity_search_with_score(
+                query, k=k * 3  # Get more results to account for filtering
+            )
+
+            # Format and deduplicate the results
+            seen_segments = set()  # Track unique segments
+            formatted_results = []
+
+            for doc, score in results:
+                # Score from Elasticsearch is already a similarity score (not distance)
+                if score >= score_threshold:
+                    # Create a unique key using content and timing
+                    text = doc.page_content.strip()
+                    segment_key = (
+                        text,
+                        doc.metadata.get("start_time"),
+                        doc.metadata.get("end_time")
+                    )
+                    
+                    # Skip if we've seen this segment
+                    if segment_key in seen_segments:
+                        continue
+                        
+                    seen_segments.add(segment_key)
+
+                    # Format the result
+                    result = {
+                        "text": text,
+                        "video_filename": doc.metadata.get("video_filename", ""),
+                        "start_time": doc.metadata.get("start_time", 0),
+                        "end_time": doc.metadata.get("end_time", 0),
+                        "score": float(score),
+                        "metadata": doc.metadata
+                    }
+                    formatted_results.append(result)
+                    
+                    # Break if we have enough unique results
+                    if len(formatted_results) >= k:
+                        break
+            
+            # Sort by score in descending order
+            formatted_results.sort(key=lambda x: x["score"], reverse=True)
+            return formatted_results
+
+        except Exception as e:
+            print(f"Search error in vector store: {e}")
+            return []
+
+    def search_transcriptions_old(
+        self, query: str, k: int = 5, score_threshold: float = 0.90
+    ) -> List[Dict]:
+        """
+        Search transcriptions using a natural language query.
+
+        Args:
+            query: Search query
+            k: Number of results to return
+            score_threshold: Minimum similarity score threshold (default: 0.85)
+
+        Returns:
+            List of relevant transcription segments with metadata
+        """
+        # Perform the search with more results since we'll filter by score
         results = self.vector_store.similarity_search_with_score(
-            query, k=k * 2, filter=filter_metadata
+            query, k=k * 3  # Get more results to account for threshold filtering
         )
 
         # Format and deduplicate the results
@@ -198,38 +262,38 @@ class VideoTranscriptionStore:
         formatted_results = []
 
         for doc, score in results:
+            # Convert distance to similarity score (0 to 1)
+            similarity_score = score
+            
+            # Skip if below threshold
+            if similarity_score < score_threshold:
+                continue
+                
             # Create a unique key for each segment using content and timing
-            segment_key = (
-                doc.page_content,
-                doc.metadata["start_time"],
-                doc.metadata["end_time"],
-                doc.metadata["video_filename"],
-            )
-
-            if segment_key not in seen_segments:
-                seen_segments.add(segment_key)
-
-                metadata = {
-                    k: v
-                    for k, v in doc.metadata.items()
-                    if k
-                    not in ["start_time", "end_time", "video_filename", "segment_id"]
-                }
-
-                result = {
-                    "text": doc.page_content,
-                    "start_time": doc.metadata["start_time"],
-                    "end_time": doc.metadata["end_time"],
-                    "video_filename": doc.metadata["video_filename"],
-                    "relevance_score": score,
-                    "metadata": metadata,
-                }
-                formatted_results.append(result)
-
-                # Break if we have enough unique results
-                if len(formatted_results) >= k:
-                    break
-
+            segment_key = (doc.page_content, doc.metadata.get("start_time"), doc.metadata.get("end_time"))
+            
+            # Skip if we've seen this segment
+            if segment_key in seen_segments:
+                continue
+                
+            seen_segments.add(segment_key)
+            
+            # Format the result
+            result = {
+                "text": doc.page_content,
+                "video_filename": doc.metadata.get("video_filename", ""),
+                "start_time": doc.metadata.get("start_time", 0),
+                "end_time": doc.metadata.get("end_time", 0),
+                "score": similarity_score,
+                "metadata": doc.metadata
+            }
+            
+            formatted_results.append(result)
+            
+            # Break if we have enough unique results
+            if len(formatted_results) >= k:
+                break
+                
         return formatted_results
 
 
@@ -254,7 +318,7 @@ def main():
 
     # Example search
     results = store.search_transcriptions(
-        query="What is great red spot? and how to install python?", k=5
+        query="What is great red spot? and how to install python?", k=3,score_threshold=0.80
     )
 
     # Print results
@@ -263,7 +327,7 @@ def main():
         print(f"\nSegment: {result['text']}")
         print(f"Video: {result['video_filename']}")
         print(f"Timestamp: {result['start_time']} - {result['end_time']}")
-        print(f"Relevance Score: {result['relevance_score']}")
+        print(f"Relevance Score: {result['score']}")
         print("Additional Metadata:", json.dumps(result["metadata"], indent=2))
 
 

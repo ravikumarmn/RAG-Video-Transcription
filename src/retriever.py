@@ -17,73 +17,141 @@ class VideoRetriever:
         # Convert to absolute paths
         self.videos_dir = str(Path(videos_dir).absolute())
         self.transcripts_dir = str(Path(transcripts_dir).absolute())
-        
+
         # Ensure directories exist
         os.makedirs(self.videos_dir, exist_ok=True)
         os.makedirs(self.transcripts_dir, exist_ok=True)
-        
+
         # Initialize store
         self.store = VideoTranscriptionStore(
             videos_dir=self.videos_dir,
             transcripts_dir=self.transcripts_dir
         )
-        
+
         # Setup transcriber if API key exists
         api_key = os.getenv("GOOGLE_API_KEY")
         if api_key:
             self.store.init_transcriber(api_key)
 
-    def format_timestamp(self, time_str: str) -> str:
-        """Convert timestamp to HH:MM:SS.mmm format."""
+    def parse_timestamp(self, time_val: str) -> float:
+        """Parse timestamp to seconds."""
         try:
-            # Convert string to float if needed
-            if isinstance(time_str, str):
-                seconds = float(time_str)
-            else:
-                seconds = float(time_str)
-                
+            # If already in seconds format
+            if isinstance(time_val, (int, float)):
+                return float(time_val)
+
+            # If in HH:MM:SS format
+            if ":" in str(time_val):
+                parts = str(time_val).split(":")
+                if len(parts) == 3:
+                    h, m, s = parts
+                    return float(h) * 3600 + float(m) * 60 + float(s)
+                elif len(parts) == 2:
+                    m, s = parts
+                    return float(m) * 60 + float(s)
+
+            # Try direct conversion
+            return float(time_val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def format_timestamp(self, time_val: str) -> str:
+        """Convert timestamp to HH:MM:SS format."""
+        try:
+            seconds = self.parse_timestamp(time_val)
             m, s = divmod(seconds, 60)
             h, m = divmod(m, 60)
-            return f"{int(h):02d}:{int(m):02d}:{s:06.3f}"
-        except (ValueError, TypeError):
-            return str(time_str)
+            return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+        except:
+            return "00:00:00"
 
     def format_result(self, result: Dict) -> Dict:
         """Format search result for display."""
         try:
             # Extract metadata
             metadata = result.get("metadata", {})
-            
+
+            # Get timestamps
+            start_time = result.get("start_time", metadata.get("start_time", 0))
+            end_time = result.get("end_time", metadata.get("end_time", 0))
+
             # Format result
             formatted = {
-                "text": result.get("text", ""),
-                "video": result.get("video_filename", ""),
+                "text": result.get("text", result.get("page_content", "")),
+                "video": result.get(
+                    "video_filename", metadata.get("video_filename", "")
+                ),
                 "timestamp": {
-                    "start": self.format_timestamp(result.get("start_time", 0)),
-                    "end": self.format_timestamp(result.get("end_time", 0))
+                    "start": self.format_timestamp(start_time),
+                    "end": self.format_timestamp(end_time),
                 },
-                "score": result.get("relevance_score", 0),
-                "metadata": metadata
+                "score": float(result.get("score", 0)),
+                "metadata": metadata,
             }
+
+            # Ensure we have valid text and video filename
+            if not formatted["text"] or not formatted["video"]:
+                return None
+
             return formatted
         except Exception as e:
             print(f"Error formatting result: {e}")
-            return {}
+            return None
 
-    def search(self, query: str, k: int = 5) -> List[Dict]:
-        """Search for video segments matching query."""
+    def search(
+        self, query: str, k: int = 5, score_threshold: float = 0.90
+    ) -> List[Dict]:
+        """
+        Search for video segments matching query.
+
+        Args:
+            query: Search query
+            k: Number of results to return
+            score_threshold: Minimum similarity score threshold (default: 0.90)
+
+        Returns:
+            List of relevant video segments with metadata
+        """
         try:
             # Get results from vector store
-            results = self.store.search_transcriptions(query, k=k)
-            
-            # Format results, filtering out empty ones
-            formatted = []
-            for r in results:
-                result = self.format_result(r)
-                if result and result.get("text"):
-                    formatted.append(result)
-            
-            return formatted
+            results = self.store.search_transcriptions(
+                query=query, k=k, score_threshold=score_threshold
+            )
+
+            if not results:
+                print(f"No results found with similarity score >= {score_threshold}")
+                return []
+
+            # Format results with deduplication
+            seen_texts = {}  # Track unique texts with their highest scores
+            formatted_results = []
+
+            for result in results:
+                # Format the result
+                formatted = self.format_result(result)
+                if not formatted:
+                    continue
+
+                # Ensure score meets threshold
+                if formatted["score"] >= score_threshold:
+                    # Check for duplicate text
+                    text = formatted["text"].strip().lower()
+
+                    # If we've seen this text before, only keep the one with higher score
+                    if text in seen_texts:
+                        if formatted["score"] > seen_texts[text]["score"]:
+                            # Remove the lower scored duplicate
+                            formatted_results.remove(seen_texts[text])
+                            formatted_results.append(formatted)
+                            seen_texts[text] = formatted
+                    else:
+                        formatted_results.append(formatted)
+                        seen_texts[text] = formatted
+
+            # Sort by score in descending order
+            formatted_results.sort(key=lambda x: x["score"], reverse=True)
+            return formatted_results[:k]
+
         except Exception as e:
             print(f"Search error: {e}")
             return []
@@ -112,19 +180,31 @@ def main():
     print("\nProcessing videos...")
     retriever.process_all_videos()
 
-    # Search example
-    query = "llamaindex"
-    print(f"\nSearching: {query}")
+    # Test queries
+    test_queries = [
+        "What is langchain?",
+        "Tell me about vector stores",
+        "How does RAG work?",
+        "python tutorial",
+    ]
 
-    results = retriever.search(query, k=5)
+    # Run searches
+    for query in test_queries:
+        print(f"\n\n=== Search Results for: '{query}' ===")
+        results = retriever.search(query=query, k=5, score_threshold=0.70)
 
-    # Display results
-    print("\nResults:")
-    for i, result in enumerate(results, 1):
-        print(f"\n{i}. {result['text']}")
-        print(f"   Video: {result['video']}")
-        print(f"   Time: {result['timestamp']['start']} - {result['timestamp']['end']}")
-        print(f"   Score: {result['score']:.4f}")
+        if not results:
+            print("No results found.")
+            continue
+
+        for i, result in enumerate(results, 1):
+            print(f"\n--- Result {i} ---")
+            print(f"Score: {result['score']:.3f}")
+            print(f"Video: {result['video']}")
+            print(
+                f"Time: {result['timestamp']['start']} - {result['timestamp']['end']}"
+            )
+            print(f"Text: {result['text']}")
 
 
 if __name__ == "__main__":

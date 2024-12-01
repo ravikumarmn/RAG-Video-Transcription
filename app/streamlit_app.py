@@ -94,6 +94,16 @@ st.markdown("""
         font-size: 0.9rem;
     }
     
+    .source-text .timestamp {
+        color: #9ca3af;
+        font-size: 0.8rem;
+        margin-bottom: 0.5rem;
+    }
+    
+    .source-text .content {
+        line-height: 1.5;
+    }
+    
     .main .block-container {
         padding-bottom: 5rem;
         max-width: 1200px;
@@ -116,6 +126,13 @@ st.markdown("""
     .chat-message {
         animation: slideIn 0.3s ease-out;
     }
+    
+    /* Improved video container styling */
+    .stVideo {
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -135,17 +152,26 @@ def parse_timestamp(timestamp):
         return 0
 
 def merge_video_segments(videos):
-    """Merge overlapping video segments and combine their texts."""
+    """
+    Merge overlapping video segments and combine their texts.
+    Now includes relevance scoring and smart merging.
+    """
+    if not videos:
+        return []
+        
     video_groups = defaultdict(list)
     
-    # Group segments by video file
+    # Group segments by video file and track scores
     for video in videos:
         start_time = parse_timestamp(video["start_time"])
-        end_time = parse_timestamp(video.get("end_time", video["start_time"])) + 10  # Default 10 sec if no end time
+        end_time = parse_timestamp(video.get("end_time", video["start_time"])) + 10
+        score = video.get("score", 0)
+        
         video_groups[video["path"]].append({
             "start": start_time,
             "end": end_time,
-            "text": video["text"]
+            "text": video["text"],
+            "score": score
         })
     
     # Merge overlapping segments for each video
@@ -154,53 +180,130 @@ def merge_video_segments(videos):
         # Sort segments by start time
         segments.sort(key=lambda x: x["start"])
         
-        # Get unique segments and find min start and max end time
-        unique_texts = []
-        min_start = segments[0]["start"]
-        max_end = segments[0]["end"]
+        # Merge overlapping segments
+        merged = []
+        current = segments[0]
         
-        for segment in segments:
-            text = segment["text"].strip()
-            if text not in unique_texts:
-                unique_texts.append(text)
-            min_start = min(min_start, segment["start"])
-            max_end = max(max_end, segment["end"])
+        for segment in segments[1:]:
+            # If segments overlap
+            if segment["start"] <= current["end"] + 5:  # 5 second buffer
+                # Extend end time
+                current["end"] = max(current["end"], segment["end"])
+                # Combine texts if they're different
+                if segment["text"].strip() not in current["text"]:
+                    current["text"] = f"{current['text']} {segment['text']}"
+                # Take max score
+                current["score"] = max(current["score"], segment["score"])
+            else:
+                merged.append(current)
+                current = segment
         
-        # Create a single merged segment
-        merged_videos.append({
-            "path": video_path,
-            "start_time": min_start,  # Keep as seconds for st.video
-            "end_time": max_end,  # Keep as seconds for st.video
-            "text": " ".join(unique_texts)
-        })
+        merged.append(current)
+        
+        # Add merged segments to final list
+        for segment in merged:
+            merged_videos.append({
+                "path": video_path,
+                "start_time": segment["start"],
+                "end_time": segment["end"],
+                "text": segment["text"].strip(),
+                "score": segment["score"]
+            })
     
-    return merged_videos
+    # Sort by relevance score
+    merged_videos.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Take top N most relevant videos
+    MAX_VIDEOS = 4
+    return merged_videos[:MAX_VIDEOS]
 
 def display_video_grid(videos, message_index):
-    """Display videos using st.video."""
-    # Merge overlapping video segments
-    merged_videos = merge_video_segments(videos)
-    
-    # Create columns for videos
-    cols = st.columns(min(len(merged_videos), 2))  # Max 2 columns
-    
-    # Display videos in columns
-    for i, video in enumerate(merged_videos):
-        col_idx = i % 2  # Alternate between columns
-        with cols[col_idx]:
-            # Display video with start time
-            st.video(video["path"], start_time=int(video["start_time"]))
+    """Display videos in a responsive grid with improved error handling."""
+    try:
+        # Merge overlapping video segments
+        merged_videos = merge_video_segments(videos)
+        
+        if not merged_videos:
+            st.warning("No relevant video segments found.")
+            return
             
-            # Display text
-            st.markdown(f"""
-                <div class="source-text">
-                    {video["text"]}
-                </div>
-            """, unsafe_allow_html=True)
+        # Calculate optimal grid layout
+        num_videos = len(merged_videos)
+        if num_videos == 1:
+            cols = st.columns([1])
+        elif num_videos == 2:
+            cols = st.columns([1, 1])
+        else:
+            cols = st.columns([1, 1])  # Max 2 columns
+        
+        # Display videos in columns
+        for i, video in enumerate(merged_videos):
+            try:
+                col_idx = i % 2  # Alternate between columns
+                with cols[col_idx]:
+                    # Add video title/info
+                    video_name = Path(video["path"]).stem
+                    relevance = f"{video['score']*100:.1f}% relevant"
+                    # st.markdown(f"##### {video_name} ({relevance})")
+                    
+                    # Display video with start time
+                    start_time = int(video["start_time"])
+                    try:
+                        st.video(
+                            video["path"],
+                            start_time=start_time
+                        )
+                    except Exception as e:
+                        st.error(f"Error loading video: {str(e)}")
+                        continue
+                    
+                    # Display timestamp and text
+                    timestamp = f"{int(start_time//60)}:{int(start_time%60):02d}"
+                    st.markdown(f"""
+                        <div class="source-text">
+                            <div class="timestamp">{timestamp}</div>
+                            <div class="content">{video["text"]}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+            except Exception as e:
+                st.error(f"Error displaying video segment: {str(e)}")
+                continue
+                
+    except Exception as e:
+        st.error(f"Error in video grid display: {str(e)}")
 
-def format_response(response_text):
-    """Format the response text only."""
+def format_response(response_text, has_valid_sources=False):
+    """Format the response text based on whether there are valid sources."""
+    if not has_valid_sources:
+        return f"Based on my knowledge: {response_text}"
     return response_text
+
+def display_chat_message(message, message_index):
+    """Display a chat message with appropriate styling."""
+    if message["type"] == "user":
+        st.markdown(f"""
+            <div class="chat-message user-message">
+                🧑‍💻 <b>You:</b><br>{message["content"]}
+            </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Display assistant message
+        st.markdown(f"""
+            <div class="chat-message bot-message">
+                🤖 <b>Assistant:</b><br>{message["content"]}
+            </div>
+        """, unsafe_allow_html=True)
+        
+        # Display videos only if they meet the threshold
+        if "videos" in message and message["videos"] and any(v.get("score", 0) >= message.get("threshold", 0.5) for v in message["videos"]):
+            # st.markdown("---")
+            # st.markdown("📺 **Relevant Video Segments:**")
+            
+            # Filter videos by threshold
+            valid_videos = [v for v in message["videos"] if v.get("score", 0) >= message.get("threshold", 0.5)]
+            if valid_videos:
+                display_video_grid(valid_videos, message_index)
 
 def main():
     st.markdown("# 🎬 Video Search Assistant")
@@ -223,22 +326,7 @@ def main():
     
     # Display chat history
     for i, message in enumerate(st.session_state.chat_history):
-        if message["type"] == "user":
-            st.markdown(f"""
-                <div class="chat-message user-message">
-                    🧑‍💻 <b>You:</b><br>{message["content"]}
-                </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-                <div class="chat-message bot-message">
-                    🤖 <b>Assistant:</b><br>{message["content"]}
-                </div>
-            """, unsafe_allow_html=True)
-            
-            # Display videos if present
-            if "videos" in message:
-                display_video_grid(message["videos"], i)
+        display_chat_message(message, i)
     
     # Search form
     with st.form("search_form", clear_on_submit=True):
@@ -248,7 +336,7 @@ def main():
         
         cols = st.columns([4, 1])
         with cols[0]:
-            query = st.text_input(
+            query = st.chat_input(
                 "",
                 placeholder="Ask me anything about the videos...",
                 label_visibility="collapsed"
@@ -269,34 +357,62 @@ def main():
         
         with st.spinner("🤖 Thinking..."):
             try:
-                response = generator.generate_response(query, k=3)
+                # Set threshold for video display
+                threshold = 0.5
+                
+                # Get response
+                response = generator.generate_response(
+                    query=query,
+                    k=5,
+                    score_threshold=0  # Get all results, we'll filter later
+                )
                 
                 if response["answer"]:
-                    # Format response with just the answer
-                    formatted_response = format_response(response["answer"])
+                    # Check if we have any sources that meet the threshold
+                    valid_sources = [s for s in response["sources"] if s["score"] >= threshold]
+                    has_valid_sources = bool(valid_sources)
                     
-                    # Add assistant's response with video segments
-                    st.session_state.chat_history.append({
+                    # Format response based on whether we have valid sources
+                    formatted_response = format_response(
+                        response["answer"],
+                        has_valid_sources=has_valid_sources
+                    )
+                    
+                    # Create assistant message
+                    assistant_message = {
                         "type": "assistant",
                         "content": formatted_response,
-                        "videos": [{
+                        "threshold": threshold  # Store threshold for video filtering
+                    }
+                    
+                    # Add video information for all sources (will be filtered in display)
+                    if response["sources"]:
+                        assistant_message["videos"] = [{
                             "path": str(videos_dir / source["video"]),
                             "start_time": source["timestamp"]["start"],
-                            "end_time": source["timestamp"].get("end", None),  # Get end time if available
-                            "text": source["text"]
+                            "end_time": source["timestamp"].get("end", None),
+                            "text": source["text"],
+                            "score": source["score"]  # Include score for filtering
                         } for source in response["sources"]]
-                    })
+                    
+                    # Add to chat history
+                    st.session_state.chat_history.append(assistant_message)
                 else:
+                    # Handle case where no answer was generated
                     st.session_state.chat_history.append({
                         "type": "assistant",
-                        "content": "I couldn't find any relevant video segments for your query. Please try asking something else."
+                        "content": "I couldn't generate a response for your query. Please try asking something else."
                     })
                 
                 # Rerun to update chat display
                 st.experimental_rerun()
             
             except Exception as e:
-                st.error(f"⚠️ Error: {e}")
+                st.error(f"⚠️ Error processing your query: {e}")
+                st.session_state.chat_history.append({
+                    "type": "assistant",
+                    "content": f"I encountered an error while processing your query: {str(e)}"
+                })
 
 if __name__ == "__main__":
     main()
