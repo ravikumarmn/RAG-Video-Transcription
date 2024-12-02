@@ -21,12 +21,20 @@ class VideoTranscriptionStore:
         self.transcriber = None  # Will be initialized when needed
 
     def init_vector_store(self) -> ElasticsearchStore:
-        # Initialize OpenAI embeddings
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+        # Initialize OpenAI embeddings with smaller dimensions for testing
+        embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",  # Use smaller model for testing
+            max_retries=3,
+            request_timeout=30,
+        )
 
         # Wait for Elasticsearch to be ready
         es_client = Elasticsearch(
-            "http://localhost:9200", basic_auth=("elastic", "changeme")
+            "http://localhost:9200",
+            basic_auth=("elastic", "changeme"),
+            retry_on_timeout=True,
+            max_retries=3,
+            request_timeout=30,
         )
 
         # Wait for up to 30 seconds for Elasticsearch to be ready
@@ -35,6 +43,33 @@ class VideoTranscriptionStore:
             try:
                 if es_client.ping():
                     print("Successfully connected to Elasticsearch")
+
+                    # Configure index settings if it doesn't exist
+                    if not es_client.indices.exists(index="video-transcriptions"):
+                        es_client.indices.create(
+                            index="video-transcriptions",
+                            body={
+                                "settings": {
+                                    "number_of_shards": 1,
+                                    "number_of_replicas": 0,
+                                    "refresh_interval": "30s",
+                                    "index": {"max_result_window": 10000},
+                                },
+                                "mappings": {
+                                    "properties": {
+                                        "text": {"type": "text"},
+                                        "embedding": {
+                                            "type": "dense_vector",
+                                            "dims": 1536,
+                                        },
+                                        "metadata": {"type": "object"},
+                                    }
+                                },
+                            },
+                        )
+                        print(
+                            "Created video-transcriptions index with optimized settings"
+                        )
                     break
             except Exception as e:
                 print(f"Waiting for Elasticsearch to be ready... {str(e)}")
@@ -94,8 +129,7 @@ class VideoTranscriptionStore:
             # Check if video exists
             video_path = Path(self.processor.videos_dir) / video_filename
             if not video_path.exists():
-                print(f"Video file {video_filename} not found.")
-                return
+                raise FileNotFoundError(f"Video file {video_filename} not found.")
 
             # Check if video is already upserted
             if self.is_video_upserted(video_filename):
@@ -106,66 +140,128 @@ class VideoTranscriptionStore:
 
             # Try to find existing transcript
             transcript_path = self.processor.find_matching_transcript(video_filename)
-
-            # If no transcript exists and transcriber is available, generate one
-            if not transcript_path and self.transcriber:
-                print(f"Generating transcript for {video_filename}...")
-                transcript_path = self.transcriber.transcribe_video(
-                    str(video_path), str(self.processor.transcripts_dir)
-                )
-            elif not transcript_path:
-                print(
+            if not transcript_path:
+                raise FileNotFoundError(
                     f"No transcript found for {video_filename} and no transcriber configured."
                 )
-                return
 
             # Process the video and its transcript
+            print(f"Processing {video_filename}...")
             result = self.processor.process_video(video_filename)
+            if not result or not result.get("segments"):
+                raise ValueError(f"No valid segments found in video: {video_filename}")
 
             # Track unique segments to prevent duplicates
             seen_segments = set()
             documents = []
+            failed_segments = []
 
+            # Pre-process all segments first
             for segment in result["segments"]:
-                # Create a unique key for this segment
-                segment_key = (
-                    segment["text"],
-                    segment["start_time"],
-                    segment["end_time"],
+                try:
+                    # Clean and validate the text
+                    text = segment["text"].strip()
+                    if not text or len(text) < 3:  # Skip very short segments
+                        continue
+
+                    # Create a unique key for this segment
+                    segment_key = (
+                        text,
+                        segment["start_time"],
+                        segment["end_time"],
+                    )
+
+                    # Skip if we've seen this segment before
+                    if segment_key in seen_segments:
+                        continue
+
+                    seen_segments.add(segment_key)
+
+                    # Create a Document object with the segment text and metadata
+                    metadata = result["metadata"].copy()
+                    metadata.update(
+                        {
+                            "start_time": segment["start_time"],
+                            "end_time": segment["end_time"],
+                            "video_filename": video_filename,
+                            "segment_index": len(documents),
+                            "segment_id": f"{video_filename}_{len(documents)}",
+                        }
+                    )
+
+                    doc = Document(page_content=text, metadata=metadata)
+                    documents.append(doc)
+                except Exception as e:
+                    print(f"Warning: Failed to process segment: {str(e)}")
+                    failed_segments.append((segment, str(e)))
+
+            if not documents:
+                raise ValueError(
+                    f"No valid segments to index in video: {video_filename}"
                 )
 
-                # Skip if we've seen this segment before
-                if segment_key in seen_segments:
-                    continue
+            print(f"Found {len(documents)} valid segments in {video_filename}")
 
-                seen_segments.add(segment_key)
+            # Add documents to the vector store in smaller batches
+            batch_size = 5  # Even smaller batch size for testing
+            successful_segments = 0
 
-                # Create a Document object with the segment text and metadata
-                metadata = result["metadata"].copy()
-                if "segment_id" in metadata:
-                    del metadata["segment_id"]
+            for i in range(0, len(documents), batch_size):
+                batch = documents[i : i + batch_size]
+                try:
+                    # Try to add the batch
+                    print(
+                        f"Attempting to index batch {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1}..."
+                    )
+                    import uuid
+                    uuids = [str(uuid.uuid4()) for _ in range(len(batch))]
+                    self.vector_store.add_documents(batch, uuids)
+                    successful_segments += len(batch)
+                    print(
+                        f"Successfully indexed batch {i//batch_size + 1}/{(len(documents)-1)//batch_size + 1} for {video_filename}"
+                    )
+                except Exception as batch_error:
+                    print(f"Batch {i//batch_size + 1} failed: {str(batch_error)}")
+                    print("Trying individual documents...")
 
-                doc = Document(
-                    page_content=segment["text"],
-                    metadata={
-                        **metadata,
-                        "start_time": segment["start_time"],
-                        "end_time": segment["end_time"],
-                    },
-                )
-                documents.append(doc)
+                    # If batch fails, try each document individually
+                    for doc in batch:
+                        try:
+                            self.vector_store.add_documents([doc])
+                            successful_segments += 1
+                            print(
+                                f"Successfully indexed individual segment: {doc.page_content[:50]}..."
+                            )
+                        except Exception as doc_error:
+                            error_msg = str(doc_error)
+                            print(f"Failed to index segment: {error_msg}")
+                            failed_segments.append((doc.page_content, error_msg))
 
-            # Add documents to the vector store
-            if documents:
-                self.vector_store.add_documents(documents)
+                # Small delay between batches
+                time.sleep(1)
+
+            # Report results
+            if successful_segments > 0:
                 print(
-                    f"Successfully upserted {len(documents)} unique segments from video: {video_filename}"
+                    f"Successfully indexed {successful_segments}/{len(documents)} segments from {video_filename}"
                 )
-            else:
-                print(f"No unique segments found in video: {video_filename}")
+
+            if failed_segments:
+                failed_count = len(failed_segments)
+                if failed_count == len(documents):
+                    raise Exception(
+                        f"All {failed_count} segments failed to index in {video_filename}. First error: {failed_segments[0][1]}"
+                    )
+                else:
+                    print(
+                        f"Warning: {failed_count} segment(s) failed to index in {video_filename}"
+                    )
+                    print("First few errors:")
+                    for content, error in failed_segments[:3]:
+                        print(f"- {content[:50]}...: {error}")
 
         except Exception as e:
-            print(f"Error processing video {video_filename}: {str(e)}")
+            raise Exception(f"Error processing video {video_filename}: {str(e)}")
 
     def upsert_all_videos(self) -> None:
         """Process and upsert all videos in the videos directory."""
@@ -189,9 +285,10 @@ class VideoTranscriptionStore:
             List of relevant transcription segments with metadata
         """
         try:
-            # Get results from vector store
+            # Get more results initially for better coverage
             results = self.vector_store.similarity_search_with_score(
-                query, k=k * 3  # Get more results to account for filtering
+                query, k=k * 4  # Get even more results to account for filtering,
+                # filter=[{"term": metadata}]
             )
 
             # Format and deduplicate the results
@@ -203,35 +300,37 @@ class VideoTranscriptionStore:
                 if score >= score_threshold:
                     # Create a unique key using content and timing
                     text = doc.page_content.strip()
+                    video_filename = doc.metadata.get("video_filename", "")
+
+                    # Create segment key with video filename to allow similar segments from different videos
                     segment_key = (
                         text,
+                        video_filename,
                         doc.metadata.get("start_time"),
-                        doc.metadata.get("end_time")
+                        doc.metadata.get("end_time"),
                     )
-                    
-                    # Skip if we've seen this segment
+
+                    # Skip if we've seen this exact segment
                     if segment_key in seen_segments:
                         continue
-                        
+
                     seen_segments.add(segment_key)
 
                     # Format the result
                     result = {
                         "text": text,
-                        "video_filename": doc.metadata.get("video_filename", ""),
+                        "video_filename": video_filename,
                         "start_time": doc.metadata.get("start_time", 0),
                         "end_time": doc.metadata.get("end_time", 0),
                         "score": float(score),
-                        "metadata": doc.metadata
+                        "metadata": doc.metadata,
                     }
                     formatted_results.append(result)
-                    
-                    # Break if we have enough unique results
-                    if len(formatted_results) >= k:
-                        break
-            
+
             # Sort by score in descending order
             formatted_results.sort(key=lambda x: x["score"], reverse=True)
+
+            # Return top k results
             return formatted_results
 
         except Exception as e:
@@ -264,20 +363,20 @@ class VideoTranscriptionStore:
         for doc, score in results:
             # Convert distance to similarity score (0 to 1)
             similarity_score = score
-            
+
             # Skip if below threshold
             if similarity_score < score_threshold:
                 continue
-                
+
             # Create a unique key for each segment using content and timing
             segment_key = (doc.page_content, doc.metadata.get("start_time"), doc.metadata.get("end_time"))
-            
+
             # Skip if we've seen this segment
             if segment_key in seen_segments:
                 continue
-                
+
             seen_segments.add(segment_key)
-            
+
             # Format the result
             result = {
                 "text": doc.page_content,
@@ -287,13 +386,13 @@ class VideoTranscriptionStore:
                 "score": similarity_score,
                 "metadata": doc.metadata
             }
-            
+
             formatted_results.append(result)
-            
+
             # Break if we have enough unique results
             if len(formatted_results) >= k:
                 break
-                
+
         return formatted_results
 
 

@@ -4,3 +4,7 @@ __pycache__
 .streamlit
 data
 *.egg-info
+.vscode
+METADATA.md
+Dockerfile
+.gitignore

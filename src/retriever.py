@@ -99,7 +99,7 @@ class VideoRetriever:
             return None
 
     def search(
-        self, query: str, k: int = 5, score_threshold: float = 0.90
+        self, query: str, k: int = 5, score_threshold: float = 0.60  # Lowered threshold
     ) -> List[Dict]:
         """
         Search for video segments matching query.
@@ -107,17 +107,22 @@ class VideoRetriever:
         Args:
             query: Search query
             k: Number of results to return
-            score_threshold: Minimum similarity score threshold (default: 0.90)
+            score_threshold: Minimum similarity score threshold (default: 0.60)
 
         Returns:
             List of relevant video segments with metadata
         """
         try:
+            print(f"\nSearching for query: {query}")
+            print(f"Score threshold: {score_threshold}")
+            
             # Get results from vector store
             results = self.store.search_transcriptions(
                 query=query, k=k, score_threshold=score_threshold
             )
 
+            print(f"Number of raw results: {len(results)}")
+            
             if not results:
                 print(f"No results found with similarity score >= {score_threshold}")
                 return []
@@ -131,26 +136,30 @@ class VideoRetriever:
                 formatted = self.format_result(result)
                 if not formatted:
                     continue
+                
+                # Check for duplicate text
+                text = formatted["text"].strip().lower()
+                
+                print(f"\nResult found:")
+                print(f"Text: {text[:100]}...")  # Print first 100 chars
+                print(f"Score: {formatted['score']}")
+                print(f"Video: {formatted.get('video_filename', 'N/A')}")
 
-                # Ensure score meets threshold
-                if formatted["score"] >= score_threshold:
-                    # Check for duplicate text
-                    text = formatted["text"].strip().lower()
-
-                    # If we've seen this text before, only keep the one with higher score
-                    if text in seen_texts:
-                        if formatted["score"] > seen_texts[text]["score"]:
-                            # Remove the lower scored duplicate
-                            formatted_results.remove(seen_texts[text])
-                            formatted_results.append(formatted)
-                            seen_texts[text] = formatted
-                    else:
+                # If we've seen this text before, only keep the one with higher score
+                if text in seen_texts:
+                    if formatted["score"] > seen_texts[text]["score"]:
+                        # Remove the lower scored duplicate
+                        formatted_results.remove(seen_texts[text])
                         formatted_results.append(formatted)
                         seen_texts[text] = formatted
+                else:
+                    formatted_results.append(formatted)
+                    seen_texts[text] = formatted
 
             # Sort by score in descending order
             formatted_results.sort(key=lambda x: x["score"], reverse=True)
-            return formatted_results[:k]
+            print(f"\nFinal number of deduplicated results: {len(formatted_results)}")
+            return formatted_results
 
         except Exception as e:
             print(f"Search error: {e}")

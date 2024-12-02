@@ -24,13 +24,31 @@ class TranscriptProcessor:
     def parse_vtt(self, vtt_path: str) -> List[TranscriptSegment]:
         """Parse a VTT file into segments."""
         segments = []
-        for caption in webvtt.read(vtt_path):
-            # Clean the text: remove multiple spaces and newlines
-            text = " ".join(caption.text.split())
-            segments.append(
-                TranscriptSegment(text=text, start=caption.start, end=caption.end)
-            )
-        return segments
+        try:
+            for caption in webvtt.read(vtt_path):
+                try:
+                    # Clean the text: remove multiple spaces, newlines, and speaker tags
+                    text = caption.text
+                    # Remove speaker tags if present
+                    text = re.sub(r'<v [^>]*>', '', text)
+                    text = re.sub(r'</v>', '', text)
+                    # Clean up whitespace
+                    text = " ".join(text.split())
+                    
+                    if text.strip():  # Only add non-empty segments
+                        segments.append(
+                            TranscriptSegment(text=text, start=caption.start, end=caption.end)
+                        )
+                except Exception as e:
+                    print(f"Warning: Failed to parse caption in {vtt_path}: {str(e)}")
+                    continue
+                    
+            if not segments:
+                raise ValueError(f"No valid segments found in transcript: {vtt_path}")
+                
+            return segments
+        except Exception as e:
+            raise ValueError(f"Failed to parse VTT file {vtt_path}: {str(e)}")
 
     def extract_metadata(self, video_path: str, transcript_path: str) -> Dict:
         """Extract metadata from video and transcript files."""
@@ -71,34 +89,76 @@ class TranscriptProcessor:
 
     def find_matching_transcript(self, video_filename: str) -> Optional[Path]:
         """Find the matching transcript file for a video."""
-        base_name = Path(video_filename).stem
-        matching_transcripts = list(self.transcripts_dir.glob(f"{base_name}*.vtt"))
-
-        if not matching_transcripts:
+        try:
+            base_name = Path(video_filename).stem.lower()
+            
+            # First try exact match with same name
+            exact_match = self.transcripts_dir / f"{base_name}.vtt"
+            if exact_match.exists():
+                print(f"Found exact transcript match: {exact_match.name}")
+                return exact_match
+            
+            # Then try case-insensitive match
+            for transcript in self.transcripts_dir.glob("*.vtt"):
+                if transcript.stem.lower() == base_name:
+                    print(f"Found case-insensitive match: {transcript.name}")
+                    return transcript
+            
+            # Try partial match (for timestamped files)
+            matching_transcripts = []
+            for transcript in self.transcripts_dir.glob("*.vtt"):
+                transcript_stem = transcript.stem.lower()
+                if transcript_stem.startswith(base_name) or base_name.startswith(transcript_stem):
+                    matching_transcripts.append(transcript)
+            
+            if matching_transcripts:
+                # Return the most recent transcript if multiple exist
+                best_match = sorted(matching_transcripts, key=lambda x: x.stat().st_mtime)[-1]
+                print(f"Found partial match: {best_match.name}")
+                return best_match
+            
+            print(f"No transcript found for video: {video_filename}")
+            print(f"Looked for:")
+            print(f"1. Exact match: {base_name}.vtt")
+            print(f"2. Case-insensitive match for: {base_name}")
+            print(f"3. Partial matches starting with: {base_name}")
             return None
-
-        # Return the most recent transcript if multiple exist
-        return sorted(matching_transcripts, key=lambda x: x.stat().st_mtime)[-1]
+            
+        except Exception as e:
+            print(f"Warning: Error finding transcript for {video_filename}: {str(e)}")
+            return None
 
     def process_video(self, video_filename: str) -> Optional[Dict]:
         """Process a single video and its transcript."""
-        video_path = self.videos_dir / video_filename
-        if not video_path.exists():
-            raise FileNotFoundError(f"Video file not found: {video_filename}")
+        try:
+            video_path = self.videos_dir / video_filename
+            if not video_path.exists():
+                raise FileNotFoundError(f"Video file not found: {video_filename}")
 
-        transcript_path = self.find_matching_transcript(video_filename)
-        if not transcript_path:
-            raise FileNotFoundError(
-                f"No matching transcript found for video: {video_filename}"
-            )
+            transcript_path = self.find_matching_transcript(video_filename)
+            if not transcript_path:
+                raise FileNotFoundError(
+                    f"No matching transcript found for video: {video_filename}"
+                )
 
-        # Parse the transcript
-        segments = self.parse_vtt(str(transcript_path))
+            # Parse the transcript
+            segments = self.parse_vtt(str(transcript_path))
+            if not segments:
+                raise ValueError(f"No valid segments found in transcript: {transcript_path}")
 
-        # Extract metadata
-        metadata = self.extract_metadata(video_path, transcript_path)
+            # Extract metadata
+            metadata = self.extract_metadata(video_path, transcript_path)
 
-        return {"segments": [seg.to_dict() for seg in segments], "metadata": metadata}
+            # Add some additional metadata
+            metadata.update({
+                "segment_count": len(segments),
+                "transcript_path": str(transcript_path)
+            })
+
+            return {"segments": [seg.to_dict() for seg in segments], "metadata": metadata}
+            
+        except Exception as e:
+            raise Exception(f"Failed to process video {video_filename}: {str(e)}")
 
     def process_all_videos(self) -> List[Dict]:
         """Process all videos in the videos directory."""

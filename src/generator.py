@@ -1,166 +1,311 @@
-"""
-Response Generator for Video Transcripts
-"""
-
-from typing import List, Dict
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional, Tuple
 import os
 from pathlib import Path
+from functools import lru_cache
 from dotenv import load_dotenv
-import google.generativeai as genai
+from openai import OpenAI
 from retriever import VideoRetriever
+import time
+
 
 load_dotenv()
 
 
+@dataclass(frozen=True)
+class VideoTimestamp:
+    """Immutable data class for video timestamps."""
+
+    start: str
+    end: str
+
+    def __str__(self) -> str:
+        return f"{self.start} - {self.end}"
+
+
+@dataclass(frozen=True)
+class VideoSegment:
+    """Immutable data class for video segments."""
+
+    text: str
+    video: str
+    timestamp: VideoTimestamp
+    score: float
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> "VideoSegment":
+        """Create a VideoSegment from a dictionary."""
+        try:
+            return cls(
+                text=str(data["text"]).strip(),
+                video=str(data["video"]),
+                timestamp=VideoTimestamp(
+                    start=str(data["timestamp"]["start"]),
+                    end=str(data["timestamp"]["end"]),
+                ),
+                score=float(data["score"]),
+            )
+        except (KeyError, ValueError, TypeError) as e:
+            raise ValueError(f"Invalid segment data: {e}")
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary format."""
+        return {
+            "text": self.text,
+            "video": self.video,
+            "timestamp": {"start": self.timestamp.start, "end": self.timestamp.end},
+            "score": self.score,
+        }
+
+
+@dataclass
+class SearchResponse:
+    """Data class for search responses."""
+
+    answer: str
+    sources: List[VideoSegment] = field(default_factory=list)
+    error: Optional[str] = None
+
+    @property
+    def has_error(self) -> bool:
+        """Check if response contains an error."""
+        return bool(self.error)
+
+
+class VideoResponseError(Exception):
+    """Custom exception for video response generation errors."""
+
+    pass
+
+
 class VideoResponseGenerator:
+    """Production-grade generator for video-based question answering using semantic search."""
+
+    # Class-level constants
+    HIGH_CONFIDENCE_THRESHOLD = 0.7
+    DEFAULT_MODEL = "gpt-4o-mini"
+    MAX_TOKENS = 400
+    TEMPERATURE = 0.7
+    MIN_QUERY_LENGTH = 3
+    MAX_QUERY_LENGTH = 500
+    DEFAULT_SEARCH_LIMIT = 15
 
     def __init__(
-        self, videos_dir: str = "videos", transcripts_dir: str = "transcripts"
+        self,
+        videos_dir: str = "videos",
+        transcripts_dir: str = "transcripts",
+        model: str = DEFAULT_MODEL,
+        high_confidence_threshold: float = HIGH_CONFIDENCE_THRESHOLD,
     ):
-        """Initialize the response generator."""
-        # Initialize retriever
-        self.retriever = VideoRetriever(videos_dir, transcripts_dir)
+        """Initialize the response generator with validation."""
+        if not isinstance(videos_dir, str) or not isinstance(transcripts_dir, str):
+            raise TypeError("Directory paths must be strings")
+        if not isinstance(model, str):
+            raise TypeError("Model name must be a string")
+        if not isinstance(high_confidence_threshold, (int, float)):
+            raise TypeError("Confidence threshold must be a number")
+        if not 0 <= high_confidence_threshold <= 1:
+            raise ValueError("Confidence threshold must be between 0 and 1")
 
-        # Initialize Gemini
-        api_key = os.getenv("GOOGLE_API_KEY")
+        self.high_confidence_threshold = high_confidence_threshold
+        self.model = model
+        self._init_retriever(videos_dir, transcripts_dir)
+        self._init_openai()
+
+    def _init_retriever(self, videos_dir: str, transcripts_dir: str) -> None:
+        """Initialize the video retriever with error handling."""
+        try:
+            self.retriever = VideoRetriever(videos_dir, transcripts_dir)
+        except Exception as e:
+            raise VideoResponseError(f"Failed to initialize VideoRetriever: {e}")
+
+    def _init_openai(self) -> None:
+        """Initialize OpenAI client with validation."""
+        api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_API_KEY environment variable is required")
+            raise VideoResponseError("OPENAI_API_KEY environment variable is required")
+        try:
+            self.client = OpenAI(api_key=api_key)
+        except Exception as e:
+            raise VideoResponseError(f"Failed to initialize OpenAI client: {e}")
 
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-flash-002")
+    def _validate_query(self, query: str) -> None:
+        """Validate the search query."""
+        if not isinstance(query, str):
+            raise TypeError("Query must be a string")
+        if not self.MIN_QUERY_LENGTH <= len(query.strip()) <= self.MAX_QUERY_LENGTH:
+            raise ValueError(
+                f"Query length must be between {self.MIN_QUERY_LENGTH} and "
+                f"{self.MAX_QUERY_LENGTH} characters"
+            )
 
-    def _format_context(self, results: List[Dict]) -> str:
-        """Format search results into context for the model."""
-        if not results:
+    def _validate_search_params(self, k: int, score_threshold: float) -> None:
+        """Validate search parameters."""
+        if not isinstance(k, int) or k < 1:
+            raise ValueError("k must be a positive integer")
+        if not isinstance(score_threshold, (int, float)):
+            raise TypeError("score_threshold must be a number")
+        if not 0 <= score_threshold <= 1:
+            raise ValueError("score_threshold must be between 0 and 1")
+
+    def _process_search_results(self, results: List[Dict]) -> List[VideoSegment]:
+        """Convert raw search results to VideoSegment objects with validation."""
+        processed_segments = []
+        for result in results:
+            try:
+                segment = VideoSegment.from_dict(result)
+                processed_segments.append(segment)
+            except ValueError as e:
+                print(f"Warning: Skipping invalid segment: {e}")
+        return processed_segments
+
+    @lru_cache(maxsize=100)
+    def _format_context(self, segments: Tuple[VideoSegment, ...]) -> str:
+        """Format search results into context."""
+        if not segments:
             return ""
 
-        # Sort by score in descending order
-        sorted_results = sorted(results, key=lambda x: x["score"], reverse=True)
-        context_parts = []
+        # sorted_segments = sorted(segments, key=lambda x: x.score, reverse=True)
+        return "\n\n".join([segment.text for segment in segments])
 
-        for i, result in enumerate(sorted_results, 1):
-            text = result["text"].strip()
-            video = result["video"]
-            time_range = (
-                f"{result['timestamp']['start']} - {result['timestamp']['end']}"
-            )
-            score = result["score"]
+    def _create_prompt(self, query: str, context: str) -> List[Dict]:
+        system_content = """You are an AI assistant that answers questions about video content.
+Instructions:
+1. Use ONLY the provided video segments to answer - do not add external information
+2. Keep responses brief and focused (2-3 sentences)
+3. Be direct and specific
+4. If segments don't contain the answer, say "I don't have enough information"
+"""
 
-            context_parts.append(
-                f"[Segment {i} (Relevance: {score:.2f})] From video '{video}' at {time_range}:\n{text}"
-            )
+        user_content = f"""Question: {query}
 
-        return "\n\n".join(context_parts)
+Context from video segments:
+{context}
+
+Provide a brief, focused answer using only the information from these segments."""
+
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+
+    def _display_segments(self, segments: List[VideoSegment]) -> None:
+        """Display relevant segments."""
+        if segments:
+            print("\nRetrieved segments:")
+            for segment in sorted(segments, key=lambda x: x.score, reverse=True)[
+                : self.DEFAULT_SEARCH_LIMIT
+            ]:
+                print(f"- {segment.text.strip()} (Score: {segment.score:.2f})")
+        else:
+            print("\nNo relevant segments found.")
 
     def generate_response(
-        self, query: str, k: int = 3, score_threshold: float = 0.70
-    ) -> Dict:
-        """
-        Generate a response based on video transcripts.
-
-        Args:
-            query: User's question
-            k: Number of relevant segments to retrieve
-            score_threshold: Minimum similarity score threshold (default: 0.70)
-
-        Returns:
-            Dict with generated answer and source segments
-        """
+        self,
+        query: str,
+        k: int = DEFAULT_SEARCH_LIMIT,
+        score_threshold: float = 0.5,
+        max_retries: int = 3,
+        retry_delay: int = 5,
+    ) -> SearchResponse:
+        """Generate a response with rate limit handling."""
         try:
-            # Get relevant segments
-            results = self.retriever.search(
+            # Validate inputs
+            self._validate_query(query)
+            self._validate_search_params(k, score_threshold)
+
+            # Perform search
+            raw_results = self.retriever.search(
                 query=query, k=k, score_threshold=score_threshold
             )
 
-            if not results:
-                return {
-                    "answer": f"No relevant information found in the video transcripts (similarity threshold: {score_threshold}).",
-                    "sources": [],
-                }
+            # Process results
+            segments = self._process_search_results(raw_results)
 
-            # Format context
-            context = self._format_context(results)
+            if not segments:
+                return SearchResponse(
+                    answer="I don't have enough information.", sources=[]
+                )
 
-            # Create prompt
-            prompt = f"""Based on these video transcript segments, answer the question. Only use information from the provided segments:
+            self._display_segments(segments)
+            context = self._format_context(tuple(segments))
+            messages = self._create_prompt(query, context)
 
-Transcript segments:
-{context}
+            # Generate response with retry logic for rate limits
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self.model,
+                        messages=messages,
+                        temperature=self.TEMPERATURE,
+                        max_tokens=self.MAX_TOKENS,
+                    )
 
-Question: {query}
+                    return SearchResponse(
+                        answer=response.choices[0].message.content,
+                        sources=sorted(segments, key=lambda x: x.score, reverse=True)[
+                            : self.DEFAULT_SEARCH_LIMIT
+                        ],
+                    )
+                except Exception as e:
+                    if "rate limit" in str(e).lower() and attempt < max_retries - 1:
+                        print(
+                            f"\nRate limit reached. Retrying in {retry_delay} seconds..."
+                        )
+                        time.sleep(retry_delay)
+                        continue
+                    raise
 
-Instructions:
-1. Answer directly and naturally without mentioning segments or sources
-2. If the answer is not evident or information is insufficient, respond with: "I don't know."
-3.Avoid speculating or adding information not present in the excerpts.
-4. Be concise but informative
-5. Don't make up information - only use what's in the transcripts
-6. If there are contradictions, explain them naturally
-
-Answer:"""
-
-            # Generate response
-            response = self.model.generate_content(prompt)
-
-            return {
-                "answer": response.text,
-                "sources": results,
-                # "context_used": context
-            }
-
+        except (ValueError, TypeError) as e:
+            return SearchResponse(
+                answer="I don't have enough information",
+                error=f"Invalid input: {str(e)}",
+            )
         except Exception as e:
-            error_msg = str(e)
-            print(f"Error generating response: {error_msg}")
-            return {
-                "answer": f"An error occurred while generating the response: {error_msg}",
-                "sources": [],
-                # "context_used": None
-            }
+            if "rate limit" in str(e).lower():
+                return SearchResponse(
+                    answer="I don't have enough information",
+                    error="Rate limit exceeded. Please try again later.",
+                )
+            return SearchResponse(
+                answer="I don't have enough information", error=f"Error: {str(e)}"
+            )
+
+
+def display_response(response: SearchResponse) -> None:
+    """Display the response in a formatted way."""
+    # Display any errors if present
+    if response.has_error:
+        print(f"\nWarning: {response.error}")
+
+    # Display the answer
+    print(f"\nAnswer: {response.answer}")
+
+    # Display sources if available
+    if response.sources:
+        print("\nSources:")
+        for source in sorted(response.sources, key=lambda x: x.score, reverse=True):
+            print(f"- {source.video} at {source.timestamp}")
 
 
 def main():
-    """Example usage."""
-    # Initialize generator
-    generator = VideoResponseGenerator()
+    """Run test queries with proper error handling."""
+    try:
+        # Initialize generator with custom settings
+        generator = VideoResponseGenerator(
+            high_confidence_threshold=0.7  # Adjust based on your needs
+        )
 
-    # Test queries
-    test_queries = [
-        "what is great gold spot?",
-    ]
+        # Test query
+        query = "what is great red spot?"
+        print(f"\nQuery: '{query}'")
 
-    # Test different thresholds
-    thresholds = [0.70, 0.50]
+        # Generate and display response
+        response = generator.generate_response(query=query, k=3, score_threshold=0.7)
+        display_response(response)
 
-    for threshold in thresholds:
-        print(f"\n{'='*80}")
-        print(f"Testing with similarity threshold: {threshold}")
-        print("=" * 80)
-
-        for query in test_queries:
-            print(f"\n\n--- Query: '{query}' ---")
-
-            # Generate response
-            response = generator.generate_response(
-                query=query, k=3, score_threshold=threshold
-            )
-
-            # Print results
-            print("\nAnswer:")
-            print(response["answer"])
-
-            print("\nSources Used:")
-            if response["sources"]:
-                for i, source in enumerate(response["sources"], 1):
-                    print(f"\n{i}. Video: {source['video']}")
-                    print(
-                        f"   Time: {source['timestamp']['start']} - {source['timestamp']['end']}"
-                    )
-                    print(f"   Score: {source['score']:.3f}")
-                    print(f"   Text: {source['text'][:100]}...")
-            else:
-                print("No sources found.")
-
-            print("\n" + "-" * 80)
+    except Exception as e:
+        print(f"An error occurred while processing your request: {e}")
 
 
 if __name__ == "__main__":
