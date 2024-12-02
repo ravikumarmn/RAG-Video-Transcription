@@ -30,8 +30,8 @@ class VideoTranscriptionStore:
 
         # Wait for Elasticsearch to be ready
         es_client = Elasticsearch(
-            "http://localhost:9200",
-            basic_auth=("elastic", "changeme"),
+            os.getenv("ELASTICSEARCH_URL"),
+            basic_auth=(os.getenv("ELASTICSEARCH_USERNAME"),   os.getenv("ELASTICSEARCH_PASSWORD")),
             retry_on_timeout=True,
             max_retries=3,
             request_timeout=30,

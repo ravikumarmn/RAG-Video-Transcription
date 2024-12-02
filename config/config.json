@@ -1,7 +1,7 @@
 {
   "models": {
     "embedding": "text-embedding-ada-002",
-    "chat_model": "gpt-4o-mini"
+    "chat_model": "gpt-35-turbo"
   },
   "paths": {
     "videos": "videos",

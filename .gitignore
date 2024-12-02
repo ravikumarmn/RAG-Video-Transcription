@@ -1,6 +1,5 @@
 *.yml
 __pycache__
-.env
 .streamlit
 data
 *.egg-info
@@ -9,3 +8,4 @@ METADATA.md
 Dockerfile
 .gitignore
 .venv
+dummy.py

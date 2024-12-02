@@ -79,9 +79,7 @@ def get_generator() -> Optional[VideoResponseGenerator]:
         return VideoResponseGenerator(
             videos_dir="videos",
             transcripts_dir="data/transcripts",
-            model=config.models[
-                "chat_model"
-            ],  # Using GPT-4 for better response quality
+            provider="azure"
         )
     except Exception as e:
         logger.error(f"Failed to initialize VideoResponseGenerator: {e}")
