@@ -1,3 +1,35 @@
+"""
+Configuration loader for the RAG Video Transcription application.
+"""
+import json
+from pathlib import Path
+from typing import Dict, Any
+
+def load_config() -> Dict[str, Any]:
+    """Load configuration from config.json file."""
+    config_path = Path(__file__).parent.parent / "config" / "config.json"
+    try:
+        with open(config_path) as f:
+            return json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load config: {e}")
+
+# Global config instance
+CONFIG = load_config()
+
+# Convenience accessors
+def get_model_config() -> Dict[str, str]:
+    return CONFIG["models"]
+
+def get_paths_config() -> Dict[str, str]:
+    return CONFIG["paths"]
+
+def get_retrieval_config() -> Dict[str, Any]:
+    return CONFIG["retrieval"]
+
+def get_display_config() -> Dict[str, int]:
+    return CONFIG["display_sources"]
+
 import os
 from pathlib import Path
 from typing import Dict, Optional

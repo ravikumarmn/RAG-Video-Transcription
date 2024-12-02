@@ -28,10 +28,10 @@ class VideoRetriever:
             transcripts_dir=self.transcripts_dir
         )
 
-        # Setup transcriber if API key exists
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if api_key:
-            self.store.init_transcriber(api_key)
+        # # Setup transcriber if API key exists
+        # api_key = os.getenv("GOOGLE_API_KEY")
+        # if api_key:
+        #     self.store.init_transcriber(api_key)
 
     def parse_timestamp(self, time_val: str) -> float:
         """Parse timestamp to seconds."""

@@ -39,6 +39,13 @@ def main():
     videos_dir = base_dir / "data" / "videos"
     transcripts_dir = base_dir / "data" / "transcripts"
 
+    # Parse command line arguments
+    import argparse
+    parser = argparse.ArgumentParser(description='Upsert videos to vector store')
+    parser.add_argument('--force', action='store_true', help='Force update existing videos')
+    parser.add_argument('--metadata-only', action='store_true', help='Only update metadata for existing videos')
+    args = parser.parse_args()
+
     # Initialize store
     try:
         store = VideoTranscriptionStore(
@@ -61,8 +68,26 @@ def main():
     for video in videos:
         video_lower = video.lower()
         try:
-            # Check if video is already properly upserted
-            if store.is_video_upserted(video):
+            # Check if video exists in store
+            video_exists = store.is_video_upserted(video)
+            
+            # Handle metadata-only update
+            if args.metadata_only:
+                if video_exists:
+                    try:
+                        store.update_video_metadata(video)
+                        success_count += 1
+                        print(f"✓ {video}: Metadata updated")
+                    except Exception as e:
+                        error_msg = str(e)
+                        print(f"✗ {video}: Error updating metadata - {error_msg}")
+                        failed_videos.append((video, f"Metadata update error: {error_msg}"))
+                else:
+                    print(f"⚠ {video}: Video not found in store, skipping metadata update")
+                continue
+
+            # Normal processing
+            if video_exists and not args.force:
                 print(f"✓ {video}: Already exists in vector store")
                 success_count += 1
                 continue
@@ -76,6 +101,11 @@ def main():
             # Get speaker information from metadata
             metadata = video_metadata.get(video, {})
             speaker = metadata.get("speaker")
+            
+            # Delete existing video if force update
+            if args.force and video_exists:
+                print(f"🔄 {video}: Forcing update...")
+                store.delete_video(video)
             
             # Upsert the video
             try:

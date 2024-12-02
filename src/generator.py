@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from retriever import VideoRetriever
 import time
-
+from config_utils import config
 
 load_dotenv()
 
@@ -31,6 +31,9 @@ class VideoSegment:
     video: str
     timestamp: VideoTimestamp
     score: float
+    metadata: Dict = field(
+        default_factory=dict, hash=False
+    )  # Make metadata unhashable but keep the class hashable
 
     @classmethod
     def from_dict(cls, data: Dict) -> "VideoSegment":
@@ -44,17 +47,19 @@ class VideoSegment:
                     end=str(data["timestamp"]["end"]),
                 ),
                 score=float(data["score"]),
+                metadata=data.get("metadata", {}),
             )
         except (KeyError, ValueError, TypeError) as e:
             raise ValueError(f"Invalid segment data: {e}")
 
     def to_dict(self) -> Dict:
-        """Convert to dictionary format."""
+        """Convert to dictionary."""
         return {
             "text": self.text,
             "video": self.video,
             "timestamp": {"start": self.timestamp.start, "end": self.timestamp.end},
             "score": self.score,
+            "metadata": self.metadata,
         }
 
 
@@ -82,18 +87,18 @@ class VideoResponseGenerator:
     """Production-grade generator for video-based question answering using semantic search."""
 
     # Class-level constants
-    HIGH_CONFIDENCE_THRESHOLD = 0.7
-    DEFAULT_MODEL = "gpt-4o-mini"
-    MAX_TOKENS = 400
+    HIGH_CONFIDENCE_THRESHOLD = config.retrieval["similarity_threshold"]
+    DEFAULT_MODEL = config.models["chat_model"]
+    MAX_TOKENS = config.retrieval["max_tokens"]
     TEMPERATURE = 0.7
     MIN_QUERY_LENGTH = 3
     MAX_QUERY_LENGTH = 500
-    DEFAULT_SEARCH_LIMIT = 15
+    DEFAULT_SEARCH_LIMIT = config.retrieval["max_sources"]
 
     def __init__(
         self,
-        videos_dir: str = "videos",
-        transcripts_dir: str = "transcripts",
+        videos_dir: str = config.paths["videos"],
+        transcripts_dir: str = config.paths["transcripts"],
         model: str = DEFAULT_MODEL,
         high_confidence_threshold: float = HIGH_CONFIDENCE_THRESHOLD,
     ):

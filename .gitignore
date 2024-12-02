@@ -8,3 +8,4 @@ data
 METADATA.md
 Dockerfile
 .gitignore
+.venv

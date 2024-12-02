@@ -86,11 +86,11 @@ class VideoTranscriptionStore:
             es_password="changeme",
         )
 
-    def init_transcriber(self, api_key: str):
-        """Initialize the video transcriber with API key."""
-        from video_transcriber import VideoTranscriber
+    # def init_transcriber(self, api_key: str):
+    #     """Initialize the video transcriber with API key."""
+    #     # from video_transcriber import VideoTranscriber
 
-        self.transcriber = VideoTranscriber(api_key)
+    #     self.transcriber = VideoTranscriber(api_key)
 
     def is_video_upserted(self, video_filename: str) -> bool:
         """Check if a video is already upserted in the vector store."""
@@ -263,6 +263,70 @@ class VideoTranscriptionStore:
         except Exception as e:
             raise Exception(f"Error processing video {video_filename}: {str(e)}")
 
+    def update_video_metadata(self, video_filename: str) -> None:
+        """Update metadata for all segments of a video in the vector store."""
+        try:
+            # Get the video's current metadata from config
+            result = self.processor.process_video(video_filename)
+            if not result or not result.get("segments"):
+                raise ValueError(f"No valid segments found in video: {video_filename}")
+
+            # Get the base metadata that will be applied to all segments
+            base_metadata = result["metadata"]
+
+            # Update all segments for this video
+            es_client = self.vector_store.client
+            es_client.update_by_query(
+                index="video-transcriptions",
+                body={
+                    "query": {
+                        "term": {"metadata.video_filename.keyword": video_filename}
+                    },
+                    "script": {
+                        "source": """
+                            // Preserve segment-specific metadata
+                            def segmentMeta = ['start_time', 'end_time', 'segment_index', 'segment_id'];
+                            def preservedValues = [:];
+                            for (def key : segmentMeta) {
+                                if (ctx._source.metadata.containsKey(key)) {
+                                    preservedValues[key] = ctx._source.metadata[key];
+                                }
+                            }
+                            // Update with new metadata
+                            ctx._source.metadata = params.metadata;
+                            // Restore segment-specific metadata
+                            for (def entry : preservedValues.entrySet()) {
+                                ctx._source.metadata[entry.getKey()] = entry.getValue();
+                            }
+                        """,
+                        "params": {"metadata": base_metadata},
+                        "lang": "painless"
+                    }
+                },
+                refresh=True
+            )
+            print(f"✓ Updated metadata for all segments of {video_filename}")
+        except Exception as e:
+            print(f"Error updating metadata for {video_filename}: {str(e)}")
+            raise
+
+    def delete_video(self, video_filename: str) -> None:
+        """Delete all segments for a video from the vector store."""
+        try:
+            es_client = self.vector_store.client
+            es_client.delete_by_query(
+                index="video-transcriptions",
+                body={
+                    "query": {
+                        "term": {"metadata.video_filename.keyword": video_filename}
+                    }
+                }
+            )
+            print(f"Deleted all segments for {video_filename}")
+        except Exception as e:
+            print(f"Error deleting video {video_filename}: {str(e)}")
+            raise
+
     def upsert_all_videos(self) -> None:
         """Process and upsert all videos in the videos directory."""
         videos_dir = Path(self.processor.videos_dir)
@@ -396,39 +460,39 @@ class VideoTranscriptionStore:
         return formatted_results
 
 
-def main():
-    # Initialize the store with your video and transcript directories
-    store = VideoTranscriptionStore(
-        videos_dir="/Users/ravikumar/Developer/upwork/RAG-Video-Transcription/data/videos",
-        transcripts_dir="/Users/ravikumar/Developer/upwork/RAG-Video-Transcription/data/transcripts",
-    )
+# def main():
+#     # Initialize the store with your video and transcript directories
+#     store = VideoTranscriptionStore(
+#         videos_dir="/Users/ravikumar/Developer/upwork/RAG-Video-Transcription/data/videos",
+#         transcripts_dir="/Users/ravikumar/Developer/upwork/RAG-Video-Transcription/data/transcripts",
+#     )
 
-    # Initialize the transcriber if GEMINI_API_KEY is available
-    gemini_api_key = os.getenv("GOOGLE_API_KEY")
-    if gemini_api_key:
-        store.init_transcriber(gemini_api_key)
-    else:
-        print(
-            "Warning: GOOGLE_API_KEY not found in environment variables. Transcription will be skipped."
-        )
+#     # Initialize the transcriber if GEMINI_API_KEY is available
+#     gemini_api_key = os.getenv("GOOGLE_API_KEY")
+#     if gemini_api_key:
+#         store.init_transcriber(gemini_api_key)
+#     else:
+#         print(
+#             "Warning: GOOGLE_API_KEY not found in environment variables. Transcription will be skipped."
+#         )
 
-    # Upsert all videos
-    store.upsert_all_videos()
+#     # Upsert all videos
+#     store.upsert_all_videos()
 
-    # Example search
-    results = store.search_transcriptions(
-        query="What is great red spot? and how to install python?", k=3,score_threshold=0.80
-    )
+#     # Example search
+#     results = store.search_transcriptions(
+#         query="What is great red spot? and how to install python?", k=3,score_threshold=0.80
+#     )
 
-    # Print results
-    print("\nSearch Results:")
-    for result in results:
-        print(f"\nSegment: {result['text']}")
-        print(f"Video: {result['video_filename']}")
-        print(f"Timestamp: {result['start_time']} - {result['end_time']}")
-        print(f"Relevance Score: {result['score']}")
-        print("Additional Metadata:", json.dumps(result["metadata"], indent=2))
+#     # Print results
+#     print("\nSearch Results:")
+#     for result in results:
+#         print(f"\nSegment: {result['text']}")
+#         print(f"Video: {result['video_filename']}")
+#         print(f"Timestamp: {result['start_time']} - {result['end_time']}")
+#         print(f"Relevance Score: {result['score']}")
+#         print("Additional Metadata:", json.dumps(result["metadata"], indent=2))
 
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()

@@ -15,6 +15,7 @@ from generator import (
     VideoTimestamp,
 )
 from collections import defaultdict
+from config_utils import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -70,19 +71,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Cache configurations
-VIDEO_CACHE_TTL = 3600  # 1 hour
-GENERATOR_CACHE_TTL = 3600  # 1 hour
 
-
-@st.cache_resource(ttl=GENERATOR_CACHE_TTL)
+@st.cache_resource()
 def get_generator() -> Optional[VideoResponseGenerator]:
     """Initialize and cache the VideoResponseGenerator."""
     try:
         return VideoResponseGenerator(
             videos_dir="videos",
             transcripts_dir="data/transcripts",
-            model="gpt-4o-mini",  # Using GPT-4 for better response quality
+            model=config.models[
+                "chat_model"
+            ],  # Using GPT-4 for better response quality
         )
     except Exception as e:
         logger.error(f"Failed to initialize VideoResponseGenerator: {e}")
@@ -112,13 +111,17 @@ def parse_timestamp(timestamp: str) -> int:
         return 0
 
 
-def filter_top_k_per_video(sources, display_k: int = 3) -> List[VideoSegment]:
+def filter_top_k_per_video(
+    sources, display_k: int = config.display_sources["display_k"]
+):
+    """Filter and return top k sources per video based on score."""
     video_groups = defaultdict(list)
     for source in sources:
         video_groups[source.video].append(source)
 
     filtered_sources = []
     for video, segments in video_groups.items():
+        # Sort by score in descending order (higher scores first)
         top_k = sorted(segments, key=lambda x: x.score, reverse=True)[:display_k]
         filtered_sources.extend(top_k)
 
@@ -129,38 +132,49 @@ def filter_top_k_per_video(sources, display_k: int = 3) -> List[VideoSegment]:
 @st.dialog("Video Sources", width="large")
 def show_sources(sources: List[VideoSegment]):
     """Display video sources in an optimized dialog."""
+    if not sources:
+        st.warning("No relevant video sources found.")
+        return
+
     # Filter sources to be taken from one file only with high score
     sources = sorted(sources, key=lambda x: (x.video, x.score), reverse=True)
-    # sources = [max(sources, key=lambda x: x.score)]
-    top_k_sources = filter_top_k_per_video(sources, display_k=3)
+    top_k_sources = filter_top_k_per_video(
+        sources, display_k=config.display_sources["display_k"]
+    )
 
     # Display videos in grid
     cols_per_row = min(2, len(top_k_sources))
-
-    for i in range(0, len(top_k_sources), cols_per_row):
+    if cols_per_row > 0:
         cols = st.columns(cols_per_row)
 
-        for col_idx, source in enumerate(top_k_sources[i : i + cols_per_row]):
-            with cols[col_idx]:
-                with st.container():
-                    video_path = os.path.join("data/videos", source.video)
-                    if os.path.exists(video_path):
-                        try:
-                            # Read and display video
-                            with open(video_path, "rb") as video_file:
-                                video_bytes = video_file.read()
-                                start_time = parse_timestamp(source.timestamp.start)
-                                st.video(video_bytes, start_time=start_time)
+        for idx, source in enumerate(top_k_sources):
+            with cols[idx % cols_per_row]:
+                try:
+                    video_path = Path("data/videos") / source.video
+                    video_file = open(video_path, "rb")
+                    video_bytes = video_file.read()
 
-                                # Display video title
-                                video_title = get_video_title(source.video)
-                                st.caption(
-                                    f"<p style='text-align: center'>{video_title}</p>",
-                                    unsafe_allow_html=True,
-                                )
-                        except Exception as e:
-                            logger.error(f"Error displaying video {video_path}: {e}")
-                            st.error(f"Error displaying video: {source.video}")
+                    if not video_path.exists():
+                        st.error(f"Video file not found: {source.video}")
+                        continue
+
+                    st.video(
+                        video_bytes,
+                        start_time=source.timestamp.start,
+                        end_time=source.timestamp.end,
+                    )
+                    # Get title from metadata or format filename
+                    title = get_video_title(source.video)
+                    if hasattr(source, 'metadata'):
+                        title = source.metadata.get('title', title)
+                    st.markdown(f"**{title}**")
+                    
+                    # st.markdown(f"**Meeting Date**: {source.metadata.get('meeting_date', '')}")
+                    # st.markdown(f"**Timestamp**: {source.timestamp.start} - {source.timestamp.end}")
+                    # st.markdown(f"**Confidence Score**: {source.score:.2f}")
+                except Exception as e:
+                    st.error(f"Error displaying video {source.video}: {str(e)}")
+                    logger.error(f"Error in show_sources: {str(e)}")
 
     if st.button("Close", key="close_sources"):
         st.session_state.show_sources = None
@@ -233,8 +247,8 @@ def main():
 
                     response = generator.generate_response(
                         query=prompt,
-                        k=5,  # Increased number of segments
-                        score_threshold=0.5,  # Lower threshold for broader coverage
+                        k=config.retrieval["max_sources"],
+                        score_threshold=config.retrieval["similarity_threshold"],
                     )
 
                 # Calculate response time

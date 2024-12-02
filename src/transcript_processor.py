@@ -4,6 +4,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import webvtt
 from pathlib import Path
+from config import config
 
 
 class TranscriptSegment:
@@ -71,6 +72,7 @@ class TranscriptProcessor:
             except ValueError:
                 pass
 
+        # Start with file system metadata
         metadata = {
             "video_filename": video_path.name,
             "video_size_bytes": video_stats.st_size,
@@ -84,6 +86,14 @@ class TranscriptProcessor:
             "transcript_processed_at": processed_date,
             "file_extension": video_path.suffix.lower(),
         }
+
+        # Get custom metadata from index_metadata.json
+        custom_metadata = config.get_video_metadata(video_path.name)
+        if custom_metadata:
+            # Merge custom metadata, preserving file system metadata if keys conflict
+            custom_metadata = {k: v for k, v in custom_metadata.items() 
+                             if k not in metadata}
+            metadata.update(custom_metadata)
 
         return metadata
 
